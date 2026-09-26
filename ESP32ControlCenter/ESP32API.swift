@@ -10,13 +10,10 @@ enum APIError: LocalizedError {
         switch self {
         case .invalidURL:
             return "Ungültige ESP32-Adresse."
-
         case .unauthorized:
             return "Nicht angemeldet oder Sitzung abgelaufen."
-
         case .server(let message):
             return message
-
         case .invalidResponse:
             return "Ungültige Antwort vom ESP32."
         }
@@ -29,11 +26,10 @@ final class ESP32API {
 
     init(baseURL: URL) {
         self.baseURL = baseURL
-
         let configuration = URLSessionConfiguration.default
         configuration.httpCookieStorage = HTTPCookieStorage.shared
         configuration.timeoutIntervalForRequest = 8
-
+        configuration.timeoutIntervalForResource = 15
         self.session = URLSession(configuration: configuration)
     }
 
@@ -47,47 +43,68 @@ final class ESP32API {
         body: Data? = nil,
         contentType: String? = nil
     ) async throws -> (Data, HTTPURLResponse) {
-
         guard let url = url(path) else {
             throw APIError.invalidURL
         }
 
-        var req = URLRequest(url: url)
-        req.httpMethod = method
-        req.httpBody = body
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
 
         if let contentType {
-            req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await session.data(for: request)
 
-        guard let http = response as? HTTPURLResponse else {
+        guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
 
-        if http.statusCode == 401 ||
-           http.statusCode == 403 ||
-           http.statusCode == 302 {
-
+        if httpResponse.statusCode == 401 ||
+           httpResponse.statusCode == 403 ||
+           httpResponse.statusCode == 302 {
             throw APIError.unauthorized
         }
 
-        guard (200...299).contains(http.statusCode) else {
-            let text =
-                String(data: data, encoding: .utf8)
-                ?? "HTTP \(http.statusCode)"
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let message = String(
+                data: data,
+                encoding: .utf8
+            ) ?? "HTTP \(httpResponse.statusCode)"
 
-            throw APIError.server(text)
+            throw APIError.server(message)
         }
 
-        return (data, http)
+        return (data, httpResponse)
+    }
+
+    private func json<T: Decodable>(
+        _ path: String,
+        method: String = "GET",
+        body: Data? = nil
+    ) async throws -> T {
+        let (data, _) = try await request(
+            path,
+            method: method,
+            body: body,
+            contentType: body == nil ? nil : "application/json"
+        )
+
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw APIError.server(
+                String(data: data, encoding: .utf8) ?? error.localizedDescription
+            )
+        }
     }
 
     // MARK: - Authentication
 
-    func login(password: String) async throws {
+    func login(username: String, password: String) async throws {
         let body = formData([
+            "username": username,
             "password": password
         ])
 
@@ -105,60 +122,50 @@ final class ESP32API {
 
     // MARK: - Dashboard
 
-    func stats() async throws -> ESPStats {
-        let (data, _) = try await request("/api/stats")
-
-        return try JSONDecoder().decode(
-            ESPStats.self,
-            from: data
-        )
+    func stats() async throws -> StatsResponse {
+        try await json("/api/stats")
     }
 
     // MARK: - Analytics
 
-    func analytics() async throws -> Analytics {
-        let (data, _) = try await request("/api/analytics")
+    func analytics() async throws -> AnalyticsResponse {
+        try await json("/api/analytics")
+    }
 
-        return try JSONDecoder().decode(
-            Analytics.self,
-            from: data
+    func resetAnalytics() async throws {
+        _ = try await request(
+            "/api/analytics/reset",
+            method: "POST"
         )
     }
 
-    // MARK: - Configuration
+    // MARK: - Config
 
-    func config() async throws -> ESPConfig {
-        let (data, _) = try await request("/api/config")
-
-        return try JSONDecoder().decode(
-            ESPConfig.self,
-            from: data
-        )
+    func config() async throws -> ServerConfig {
+        try await json("/api/config")
     }
 
-    func saveConfig(
-        name: String,
-        lang: String,
-        theme: String
-    ) async throws {
-
-        let body = formData([
-            "name": name,
-            "lang": lang,
-            "theme": theme
-        ])
+    func saveConfig(_ config: ServerConfig) async throws {
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(config)
 
         _ = try await request(
             "/api/config",
             method: "POST",
-            body: body,
-            contentType: "application/x-www-form-urlencoded"
+            body: data,
+            contentType: "application/json"
         )
     }
 
-    func changePassword(_ password: String) async throws {
+    // MARK: - Password
+
+    func changePassword(
+        oldPassword: String,
+        newPassword: String
+    ) async throws {
         let body = formData([
-            "password": password
+            "oldPassword": oldPassword,
+            "newPassword": newPassword
         ])
 
         _ = try await request(
@@ -171,154 +178,124 @@ final class ESP32API {
 
     // MARK: - Files
 
-    func files() async throws -> [ESPFile] {
-        let (data, _) = try await request("/api/files")
-
-        return try JSONDecoder().decode(
-            [ESPFile].self,
-            from: data
-        )
+    func files() async throws -> [FileItem] {
+        try await json("/api/files")
     }
 
-    func readFile(_ path: String) async throws -> String {
-
-        let escaped =
-            path.addingPercentEncoding(
-                withAllowedCharacters: .urlQueryAllowed
-            ) ?? path
+    func readFile(path: String) async throws -> String {
+        let encoded = path.addingPercentEncoding(
+            withAllowedCharacters: .urlQueryAllowed
+        ) ?? path
 
         let (data, _) = try await request(
-            "/api/read?file=\(escaped)"
+            "/api/read?path=\(encoded)"
         )
 
-        return String(
-            data: data,
-            encoding: .utf8
-        ) ?? ""
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
-    func saveFile(
-        _ path: String,
-        content: String
-    ) async throws {
-
-        let body = formData([
-            "file": path,
+    func saveFile(path: String, content: String) async throws {
+        let body: [String: String] = [
+            "path": path,
             "content": content
-        ])
+        ]
+
+        let data = try JSONSerialization.data(
+            withJSONObject: body
+        )
 
         _ = try await request(
             "/api/save",
             method: "POST",
-            body: body,
-            contentType: "application/x-www-form-urlencoded"
+            body: data,
+            contentType: "application/json"
         )
     }
 
-    func deleteFile(_ path: String) async throws {
+    func deleteFile(path: String) async throws {
+        let body: [String: String] = [
+            "path": path
+        ]
 
-        let body = formData([
-            "file": path
-        ])
+        let data = try JSONSerialization.data(
+            withJSONObject: body
+        )
 
         _ = try await request(
             "/delete",
             method: "POST",
-            body: body,
-            contentType: "application/x-www-form-urlencoded"
+            body: data,
+            contentType: "application/json"
         )
     }
 
     // MARK: - Upload
 
     func uploadFile(
-        name: String,
-        data: Data
+        data fileData: Data,
+        filename: String,
+        mimeType: String = "application/octet-stream"
     ) async throws {
-
         guard let url = url("/upload") else {
             throw APIError.invalidURL
         }
 
-        let boundary =
-            "Boundary-\(UUID().uuidString)"
+        let boundary = "Boundary-\(UUID().uuidString)"
 
-        var body = Data()
-
-        body.append(
-            Data(
-                "--\(boundary)\r\n".utf8
-            )
-        )
-
-        let safeName =
-            name.replacingOccurrences(
-                of: "\"",
-                with: ""
-            )
-
-        body.append(
-            Data(
-                "Content-Disposition: form-data; name=\"file\"; filename=\"\(safeName)\"\r\n"
-                    .utf8
-            )
-        )
-
-        body.append(
-            Data(
-                "Content-Type: application/octet-stream\r\n\r\n"
-                    .utf8
-            )
-        )
-
-        body.append(data)
-
-        body.append(
-            Data(
-                "\r\n--\(boundary)--\r\n".utf8
-            )
-        )
-
-        var req = URLRequest(url: url)
-
-        req.httpMethod = "POST"
-
-        req.setValue(
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(
             "multipart/form-data; boundary=\(boundary)",
             forHTTPHeaderField: "Content-Type"
         )
 
-        req.httpBody = body
+        var body = Data()
 
-        let (responseData, response) =
-            try await session.data(for: req)
+        body.append(
+            Data("--\(boundary)\r\n".utf8)
+        )
 
-        // Wichtig:
-        // URLResponse besitzt kein statusCode.
-        // Deshalb muss hier zuerst zu HTTPURLResponse gecastet werden.
+        body.append(
+            Data(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n"
+                    .utf8
+            )
+        )
 
-        guard let httpResponse =
-                response as? HTTPURLResponse else {
+        body.append(
+            Data(
+                "Content-Type: \(mimeType)\r\n\r\n"
+                    .utf8
+            )
+        )
 
+        body.append(fileData)
+        body.append(Data("\r\n".utf8))
+        body.append(Data("--\(boundary)--\r\n".utf8))
+
+        let (responseData, response) = try await session.data(
+            for: request,
+            delegate: nil
+        )
+
+        // IMPORTANT:
+        // URLSession returns URLResponse here, not HTTPURLResponse.
+        // Always cast before accessing statusCode.
+        guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
 
         if httpResponse.statusCode == 401 ||
            httpResponse.statusCode == 403 ||
            httpResponse.statusCode == 302 {
-
             throw APIError.unauthorized
         }
 
-        guard (200...299).contains(
-            httpResponse.statusCode
-        ) else {
-
-            let message =
-                String(
-                    data: responseData,
-                    encoding: .utf8
-                ) ?? "Upload fehlgeschlagen."
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let message = String(
+                data: responseData,
+                encoding: .utf8
+            ) ?? "Upload fehlgeschlagen."
 
             throw APIError.server(message)
         }
@@ -326,28 +303,11 @@ final class ESP32API {
 
     // MARK: - Logs
 
-    func logs() async throws -> String {
-
-        let (data, _) =
-            try await request("/api/logs")
-
-        if let array =
-            try? JSONSerialization.jsonObject(
-                with: data
-            ) as? [String] {
-
-            return array.joined(
-                separator: "\n"
-            )
-        }
-
-        return String(
-            data: data,
-            encoding: .utf8
-        ) ?? ""
+    func logs() async throws -> LogsResponse {
+        try await json("/api/logs")
     }
 
-    // MARK: - Server
+    // MARK: - Server actions
 
     func restart() async throws {
         _ = try await request(
@@ -363,41 +323,31 @@ final class ESP32API {
         )
     }
 
-    func resetAnalytics() async throws {
-        _ = try await request(
-            "/api/analytics/reset",
-            method: "POST"
-        )
-    }
-
-    // MARK: - Form Data
+    // MARK: - Helpers
 
     private func formData(
         _ values: [String: String]
     ) -> Data {
+        let allowed = CharacterSet.urlQueryAllowed
 
-        let encoded =
-            values.map {
-                "\(percent($0.key))=\(percent($0.value))"
+        let string = values
+            .map { key, value in
+                let encodedKey = key.addingPercentEncoding(
+                    withAllowedCharacters: allowed
+                ) ?? key
+
+                let encodedValue = value.addingPercentEncoding(
+                    withAllowedCharacters: allowed
+                ) ?? value
+
+                return "\(encodedKey)=\(encodedValue)"
             }
             .joined(separator: "&")
 
-        return Data(encoded.utf8)
+        return Data(string.utf8)
     }
 
-    private func percent(
-        _ value: String
-    ) -> String {
-
-        var allowed =
-            CharacterSet.urlQueryAllowed
-
-        allowed.remove(
-            charactersIn: "+&="
-        )
-
-        return value.addingPercentEncoding(
-            withAllowedCharacters: allowed
-        ) ?? value
+    static func percent(_ value: Double) -> Int {
+        Int(max(0, min(100, value * 100)))
     }
 }
