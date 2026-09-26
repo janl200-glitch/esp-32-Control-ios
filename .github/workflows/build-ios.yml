@@ -11,16 +11,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show project
+      - name: Find Xcode project
         run: |
+          echo "Repository:"
           pwd
-          ls -la
-          find . -maxdepth 2 -name "*.xcodeproj" -print
+          echo "Files:"
+          find . -maxdepth 4 -type f | sort
+
+          PROJECT=$(find . -name "*.xcodeproj" -type d | head -n 1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Kein .xcodeproj gefunden!"
+            exit 1
+          fi
+
+          echo "Gefunden: $PROJECT"
+
+          PROJECT_DIR=$(dirname "$PROJECT")
+          PROJECT_NAME=$(basename "$PROJECT")
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
 
       - name: Build iOS app
         run: |
+          cd "$PROJECT_DIR"
+
           xcodebuild \
-            -project ESP32ControlCenter.xcodeproj \
+            -project "$PROJECT_NAME" \
             -scheme ESP32ControlCenter \
             -sdk iphoneos \
             -configuration Release \
@@ -29,17 +47,23 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY=""
 
-      - name: Find app
+      - name: Find built app
         run: |
-          APP=$(find build -type d -name "*.app" | head -n 1)
-          echo "Found: $APP"
-          test -n "$APP"
+          APP=$(find "$PROJECT_DIR/build" -type d -name "*.app" | head -n 1)
+
+          if [ -z "$APP" ]; then
+            echo "ERROR: Keine .app gefunden!"
+            exit 1
+          fi
+
+          echo "APP gefunden: $APP"
           echo "APP=$APP" >> "$GITHUB_ENV"
 
       - name: Create IPA
         run: |
           mkdir -p output/Payload
           cp -R "$APP" output/Payload/ESP32ControlCenter.app
+
           cd output
           zip -qry ESP32ControlCenter-unsigned.ipa Payload
 
