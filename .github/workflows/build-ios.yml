@@ -11,11 +11,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show project
+      - name: Check project
         run: |
           pwd
           ls -la
-          find . -maxdepth 2 -name "*.xcodeproj" -print
+          find . -name "*.xcodeproj" -print
 
       - name: Build iOS app
         run: |
@@ -32,7 +32,7 @@ jobs:
       - name: Find app
         run: |
           APP=$(find build -type d -name "*.app" | head -n 1)
-          echo "Found: $APP"
+          echo "Found app: $APP"
           test -n "$APP"
           echo "APP=$APP" >> "$GITHUB_ENV"
 
