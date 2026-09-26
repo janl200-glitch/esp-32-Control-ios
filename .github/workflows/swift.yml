@@ -1,22 +1,50 @@
-# This workflow will build a Swift project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-swift
-
-name: Swift
+name: Build unsigned iOS app
 
 on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   build:
-
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check project
+        run: |
+          pwd
+          ls -la
+          find . -name "*.xcodeproj" -print
+
+      - name: Build iOS app
+        run: |
+          xcodebuild \
+            -project ESP32ControlCenter.xcodeproj \
+            -scheme ESP32ControlCenter \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Find app
+        run: |
+          APP=$(find build -type d -name "*.app" | head -n 1)
+          echo "Found app: $APP"
+          test -n "$APP"
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: Create IPA
+        run: |
+          mkdir -p output/Payload
+          cp -R "$APP" output/Payload/ESP32ControlCenter.app
+          cd output
+          zip -qry ESP32ControlCenter-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32ControlCenter-iOS-unsigned
+          path: output/ESP32ControlCenter-unsigned.ipa
